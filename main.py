@@ -68,7 +68,7 @@ def get_base_ydl_opts():
         'simulate': True,
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
     }
-    # إضافة ملف الكوكيز إذا كان موجوداً
+    # إضافة ملف الكوكيز إذا كان موجوداً - الحل لمشكلة يوتيوب
     if os.path.exists(COOKIE_FILE):
         opts['cookiefile'] = COOKIE_FILE
     return opts
@@ -110,22 +110,19 @@ def get_available_formats(url):
                 
                 if best_format:
                     actual_height = best_format.get('height')
-                    # نستخدم الدقة الفعلية كـ key ونستخدم format_id كـ value
                     available_formats[f"{actual_height}p"] = best_format['format_id']
                     
             return available_formats, info_dict
             
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp DownloadError: {e}")
-        # يتم إرجاع الخطأ كـ str للتحقق منه في handle_link
         return False, str(e)
     except Exception as e:
         logger.error(f"An unexpected error occurred in yt-dlp: {e}")
         return False, str(e)
 
 def download_media(url, format_id=None):
-    """يقوم بتنزيل الوسائط (فيديو أو صورة) باستخدام yt-dlp."""
-    # **ملاحظة:** يجب أن يكون مجلد 'downloads' موجودًا (يتم إنشاؤه في main)
+    """يقوم بتنزيل الوسائط (فيديو أو صورة) باستخدام yt-dlp. (تم تعديلها لدمج الصوت والفيديو)"""
     output_template = os.path.join(os.getcwd(), 'downloads', '%(title)s.%(ext)s')
     
     ydl_opts = {
@@ -140,7 +137,7 @@ def download_media(url, format_id=None):
         }] if format_id else [],
     }
     
-    # إضافة ملف الكوكيز إذا كان موجوداً
+    # إضافة ملف الكوكيز إذا كان موجوداً - الحل لمشكلة يوتيوب
     if os.path.exists(COOKIE_FILE):
         ydl_opts['cookiefile'] = COOKIE_FILE
     
@@ -175,9 +172,8 @@ async def check_subscription(update: Update, context):
     user_id = update.effective_user.id
     
     if not CHANNEL_ID:
-        # إذا لم يتم تعيين معرف القناة
         logger.warning("CHANNEL_ID is not set in environment variables.")
-        return True # السماح بالاستمرار إذا لم يتم تعيين القناة
+        return True 
     
     try:
         chat_member = await context.bot.get_chat_member(CHANNEL_ID, user_id)
@@ -185,13 +181,12 @@ async def check_subscription(update: Update, context):
         if chat_member.status in ['member', 'administrator', 'creator']:
             return True
         else:
-            # محاولة الحصول على رابط دعوة
             invite_link = None
             try:
                 chat = await context.bot.get_chat(CHANNEL_ID)
                 invite_link = chat.invite_link or f"https://t.me/{CHANNEL_ID.lstrip('@')}"
             except Exception:
-                invite_link = "https://t.me/telegram" # رابط وهمي
+                invite_link = "https://t.me/telegram" 
             
             keyboard = [[InlineKeyboardButton("اشترك في القناة", url=invite_link)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -206,7 +201,6 @@ async def check_subscription(update: Update, context):
         error_message = str(e)
         logger.error(f"Error checking subscription: {error_message}")
         
-        # رسالة خطأ للمدير/المستخدم لتوضيح المشكلة
         if update.effective_user.id == ADMIN_ID:
             await update.message.reply_text(f"خطأ إجباري: {error_message}")
         else:
@@ -221,7 +215,6 @@ async def check_subscription(update: Update, context):
 async def start_command(update: Update, context):
     """يرد على أمر /start."""
     user = update.effective_user
-    # تسجيل المستخدم النشط
     username = user.username or f"User_{user.id}"
     ACTIVE_USERS[user.id] = username
     
@@ -233,14 +226,11 @@ async def start_command(update: Update, context):
     if not await check_subscription(update, context):
         return
     
-    # يمكنك إضافة الزر هنا كما طلب المستخدم في البداية (اختياري، لكني سأركز على الوظيفة الأساسية)
     await update.message.reply_text(
         "أهلاً بك في بوت تنزيل الوسائط! \n"
         "أرسل لي **رابط** فيديو أو صورة من أي منصة تواصل اجتماعي وسأقوم بتنزيلها لك. \n"
         "للفيديو، سأعرض لك خيارات الدقة المتاحة."
     )
-
-# ... (وظائف admin_command, block_command, unblock_command لم تتغير) ...
 
 async def admin_command(update: Update, context):
     """يعرض لوحة التحكم للمدير."""
@@ -347,7 +337,7 @@ async def unblock_command(update: Update, context):
         await update.message.reply_text(f"لم يتم العثور على المستخدم {target} في قائمة المستخدمين النشطين.")
 
 async def handle_link(update: Update, context):
-    """يعالج الروابط المرسلة من المستخدمين. (تم تعديلها لمعالجة خطأ 'No video found')"""
+    """يعالج الروابط المرسلة من المستخدمين. (تم تعديلها لمعالجة خطأ 'No video found' و 'Sign In')"""
     user = update.effective_user
     user_id = user.id
     username = user.username or f"User_{user.id}"
@@ -366,29 +356,26 @@ async def handle_link(update: Update, context):
         await update.message.reply_text("الرجاء إرسال رابط صحيح.")
         return
 
-    # إرسال رسالة انتظار قابلة للتعديل
     wait_message = await update.message.reply_text("جاري تحليل الرابط... قد يستغرق هذا بضع ثوانٍ.")
     
     formats, info = get_available_formats(url)
     
     if formats is False:
-        # **الإصلاح:** معالجة أخطاء yt-dlp المتوقعة
+        # **معالجة أخطاء yt-dlp الخارجية**
         error_info = str(info)
         
-        # معالجة خطأ X/تويتر 'No video found'
-        if "No video could be found in this tweet" in error_info:
+        if "No video could be found in this tweet" in error_info or "No video formats found" in error_info:
              await wait_message.edit_text("عذراً، لم يتم العثور على فيديو في الرابط المرسل (قد تكون صورة أو ملف غير مدعوم).")
              return
              
-        # معالجة خطأ يوتيوب 'Sign in required'
-        elif "Sign in to confirm you're not a bot" in error_info or "Private video" in error_info:
-             await wait_message.edit_text(
-                "عذراً، يتطلب هذا الفيديو تسجيل الدخول أو أنه فيديو خاص. "
-                "إذا كنت قد قمت بإضافة ملف `youtube_cookies.txt`، فقد تكون المشكلة في انتهاء صلاحيته."
+        elif "Sign in to confirm you're not a bot" in error_info or "Private video" in error_info or "Video unavailable" in error_info:
+             msg = (
+                 "عذراً، يتطلب هذا الفيديو تسجيل الدخول أو أنه خاص. "
+                 "يرجى التأكد من أنك قمت بإضافة ملف `youtube_cookies.txt` صالح بجوار ملف البوت."
              )
+             await wait_message.edit_text(msg)
              return
         
-        # خطأ عام
         await wait_message.edit_text(f"عذراً، حدث خطأ أثناء تحليل الرابط: {error_info}")
         return
         
@@ -402,12 +389,13 @@ async def handle_link(update: Update, context):
             await wait_message.edit_text(f"عذراً، حدث خطأ أثناء تنزيل الملف: {info}")
             return
             
-        file_paths_to_delete = downloaded_files # قائمة بالمسارات لحذفها لاحقاً
+        file_paths_to_delete = downloaded_files
         
         try:
             for file_path in downloaded_files:
                 # **التحسين:** استخدام with open لضمان إغلاق الملف
                 with open(file_path, 'rb') as f:
+                    # محاولة استنتاج الامتداد من info_dict أو file_path
                     ext = info.get('ext', os.path.splitext(file_path)[1].lstrip('.').lower())
                     
                     if ext in ['jpg', 'jpeg', 'png', 'webp']:
@@ -424,7 +412,7 @@ async def handle_link(update: Update, context):
             await wait_message.edit_text(f"عذراً، حدث خطأ أثناء إرسال الملف: {e}")
             
         finally:
-            # **التحسين:** ضمان حذف الملفات حتى في حال حدوث خطأ أثناء الإرسال
+            # **التحسين:** ضمان حذف الملفات
             for file_path in file_paths_to_delete:
                 if os.path.exists(file_path):
                     os.remove(file_path)
@@ -446,7 +434,7 @@ async def handle_link(update: Update, context):
     )
 
 async def button_callback(update: Update, context):
-    """يعالج ضغطات الأزرار المضمنة (Inline Buttons). (تم إصلاحها بالكامل)"""
+    """يعالج ضغطات الأزرار المضمنة (Inline Buttons)."""
     query = update.callback_query
     await query.answer() 
     
@@ -483,7 +471,7 @@ async def button_callback(update: Update, context):
             else:
                 await query.edit_message_text("المستخدم غير محظور أصلاً.")
         
-        return # **الإصلاح:** الخروج من الدالة بعد معالجة أمر المدير
+        return 
 
     # معالجة أمر التنزيل
     elif data_type == "download":
@@ -518,7 +506,7 @@ async def button_callback(update: Update, context):
             await query.edit_message_text(f"عذراً، حدث خطأ أثناء إرسال الفيديو: {e}")
             
         finally:
-            # **التحسين:** ضمان حذف الملفات حتى في حال حدوث خطأ أثناء الإرسال
+            # **التحسين:** ضمان حذف الملفات
             for file_path in file_paths_to_delete:
                 if os.path.exists(file_path):
                     os.remove(file_path)
@@ -537,6 +525,13 @@ def main():
         logger.error("ADMIN_ID is not set. Please set the environment variable.")
         return
     
+    # رسالة تنبيه بشأن ملف الكوكيز
+    if not os.path.exists(COOKIE_FILE):
+        logger.warning(
+            f"⚠️ {COOKIE_FILE} not found. YouTube download errors may occur due to sign-in requirements. "
+            f"Please place a valid cookies file in the bot directory."
+        )
+        
     # التأكد من وجود مجلد التحميلات
     if not os.path.exists('downloads'):
         os.makedirs('downloads')
@@ -548,7 +543,6 @@ def main():
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("block", block_command))
     application.add_handler(CommandHandler("unblock", unblock_command))
-    # يستخدم MessageHandler للروابط النصية التي ليست أوامر
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link)) 
     application.add_handler(CallbackQueryHandler(button_callback))
 
