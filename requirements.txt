@@ -1,6 +1,7 @@
 python-telegram-bot
-
+os
 yt-dlp
-
-
+logging
+re
+json
 
