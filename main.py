@@ -1,5 +1,3 @@
-# main.py (النسخة المصححة لمشكلة البث)
-
 import logging
 import os
 import asyncio
@@ -8,13 +6,13 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler, ConversationHandler
 from telegram.constants import ChatMemberStatus
 
-# --- إعدادات أساسية (تُقرأ من متغيرات البيئة) ---
 try:
     BOT_TOKEN = os.environ.get("BOT_TOKEN")
     ADMIN_ID = int(os.environ.get("ADMIN_ID"))
     CHANNEL_ID = os.environ.get("CHANNEL_ID")
 except (TypeError, ValueError):
-    print("خطأ: لم يتم العثور على متغيرات البيئة. سيتم استخدام القيم المحلية للتجربة.")
+    print("خطأ: لم يتم العثور على متغيرات البيئة.")
+    exit()
 
 # أسماء الملفات لتخزين البيانات
 USERS_FILE = "users.txt"
@@ -25,12 +23,12 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(_name_)
 
 # حالات المحادثة لميزة البث
 BROADCAST_MESSAGE = range(1)
 
-# --- دوال الأدمن وحفظ البيانات (كما هي) ---
+# --- دوال الأدمن وحفظ البيانات ---
 def get_all_user_ids():
     if not os.path.exists(USERS_FILE): return []
     try:
@@ -46,13 +44,13 @@ def add_user_to_file(user_id: int):
     except Exception as e: logger.error(f"خطأ في إضافة مستخدم: {e}")
 
 def get_users_count() -> int: return len(get_all_user_ids())
+
 def add_link_to_file(user_id: int, link: str):
     try:
         with open(LINKS_FILE, "a", encoding='utf-8') as f: f.write(f"User_ID: {user_id}, Link: {link}\n")
     except Exception as e: logger.error(f"خطأ في إضافة رابط: {e}")
 
 def get_last_links(count: int = 10) -> str:
-    # ... (الكود هنا لم يتغير)
     try:
         if not os.path.exists(LINKS_FILE): return "لم يتم إرسال أي روابط بعد."
         with open(LINKS_FILE, "r", encoding='utf-8') as f:
@@ -83,9 +81,8 @@ async def start_command(update: Update, context: CallbackContext):
         keyboard = [[InlineKeyboardButton("✅ اضغط هنا للاشتراك", url=f"https://t.me/{CHANNEL_ID.replace('@', '')}")]]
         await update.message.reply_text(welcome_message, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# --- معالجة الروابط والتحميل (كما هي) ---
+# --- معالجة الروابط والتحميل ---
 async def handle_link(update: Update, context: CallbackContext):
-    # ... (الكود هنا لم يتغير)
     user_id = update.message.from_user.id
     if not await is_user_subscribed(user_id, context):
         await update.message.reply_text("عذراً، يجب عليك الاشتراك في القناة أولاً. اضغط /start للمحاولة مجدداً.")
@@ -118,7 +115,6 @@ async def handle_link(update: Update, context: CallbackContext):
         await processing_message.edit_text("❌ عذراً، لم أتمكن من معالجة هذا الرابط.")
 
 async def button_handler(update: Update, context: CallbackContext):
-    # ... (الكود هنا لم يتغير)
     query = update.callback_query
     await query.answer()
     action = query.data
@@ -132,7 +128,6 @@ async def button_handler(update: Update, context: CallbackContext):
         await download_and_send(query, context, format_id=format_id)
 
 async def download_and_send(query, context, format_id):
-    # ... (الكود هنا لم يتغير)
     info = context.user_data.get('video_info')
     chat_id = query.message.chat_id
     progress_hooks = [lambda d: progress_hook(d, query, context)]
@@ -154,7 +149,6 @@ async def download_and_send(query, context, format_id):
             os.remove(filename)
 
 async def progress_hook(d, query, context):
-    # ... (الكود هنا لم يتغير)
     if d['status'] == 'downloading':
         if 'last_update' in context.user_data and (d['_eta_str'] == context.user_data.get('last_update')): return
         percent, speed, eta = d['_percent_str'].strip(), d['_speed_str'].strip(), d['_eta_str'].strip()
@@ -163,7 +157,7 @@ async def progress_hook(d, query, context):
             context.user_data['last_update'] = eta
         except Exception: pass
 
-# --- أوامر الأدمن (تم تحديثها) ---
+# --- أوامر الأدمن ---
 async def admin_command(update: Update, context: CallbackContext):
     if update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("هذا الأمر مخصص للمالك فقط.")
@@ -190,7 +184,7 @@ async def admin_button_handler(update: Update, context: CallbackContext):
         await query.edit_message_text("حسناً، أرسل الآن الرسالة التي تود إرسالها لجميع المستخدمين. للإلغاء أرسل /cancel.")
         return BROADCAST_MESSAGE
 
-# --- دوال ميزة البث (تم تصحيحها) ---
+# --- دوال ميزة البث ---
 async def broadcast_message_handler(update: Update, context: CallbackContext):
     message_to_broadcast = update.message
     user_ids = get_all_user_ids()
@@ -199,12 +193,9 @@ async def broadcast_message_handler(update: Update, context: CallbackContext):
     success_count = 0
     fail_count = 0
     
-    # هنا نستخدم context.application.bot بدلاً من context.bot
-    bot = context.application.bot 
-    
     for user_id in user_ids:
         try:
-            await bot.copy_message(chat_id=user_id, from_chat_id=update.message.chat_id, message_id=message_to_broadcast.message_id)
+            await context.bot.copy_message(chat_id=user_id, from_chat_id=update.message.chat_id, message_id=message_to_broadcast.message_id)
             success_count += 1
             await asyncio.sleep(0.1)
         except Exception as e:
@@ -218,17 +209,9 @@ async def cancel_broadcast(update: Update, context: CallbackContext):
     await update.message.reply_text("تم إلغاء عملية البث.")
     return ConversationHandler.END
 
-async def post_init(application: Application):
-    """دالة للتهيئة بعد تشغيل البوت"""
-    await application.bot.set_my_commands([
-        ('start', 'بدء استخدام البوت'),
-        ('admin', 'لوحة تحكم المالك')
-    ])
-
-async def main():
+def main():
     """الدالة الرئيسية لتشغيل البوت"""
-    # تم إضافة post_init هنا
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    application = Application.builder().token(BOT_TOKEN).build()
 
     broadcast_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_button_handler, pattern='^admin_broadcast$')],
@@ -236,7 +219,7 @@ async def main():
             BROADCAST_MESSAGE: [MessageHandler(filters.ALL & ~filters.COMMAND, broadcast_message_handler)],
         },
         fallbacks=[CommandHandler('cancel', cancel_broadcast)],
-        conversation_timeout=300 # مهلة 5 دقائق
+        conversation_timeout=300
     )
 
     application.add_handler(CommandHandler("start", start_command))
@@ -248,15 +231,8 @@ async def main():
     application.add_handler(CallbackQueryHandler(admin_button_handler, pattern='^admin_'))
 
     print("البوت قيد التشغيل...")
-    # تم تغيير run_polling إلى الطريقة الجديدة
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    # حلقة لا نهائية لإبقاء البوت يعمل
-    while True:
-        await asyncio.sleep(3600)
+    application.run_polling()
 
-if __name__ == '__main__':
-    # تشغيل الدالة الرئيسية غير المتزامنة
-    asyncio.run(main())
+# --- السطر الذي طلبته ---
+if _name_ == "_main_":
+    main()
