@@ -169,24 +169,35 @@ async def check_subscription(update: Update, context):
     user_id = update.effective_user.id
     
     try:
-        # استخدام get_chat_member للتحقق من حالة العضوية
-        chat_member = await context.bot.get_chat_member(MANDATORY_CHANNEL_ID, user_id)
+        # 1. التحقق من حالة العضوية
+        chat_member = await context.bot.get_chat_member(CHANNEL_ID, user_id)
         
         # حالات العضوية المقبولة: member, administrator, creator
         if chat_member.status in ['member', 'administrator', 'creator']:
             return True
+        
+        # 2. إذا لم يكن مشتركًا، نطلب منه الاشتراك
         else:
-            # المستخدم ليس مشتركًا
-            # يجب أن تكون القناة عامة ليتمكن المستخدم من الانضمام عبر الرابط
-            # أو يجب أن يكون البوت مشرفًا في القناة الخاصة
-            channel_username = MANDATORY_CHANNEL_ID.lstrip('@')
-            if not channel_username.startswith('-100'):
-                url = f"https://t.me/{channel_username}"
-            else:
-                # لا يمكن إنشاء رابط دعوة مباشر للقنوات الخاصة دون صلاحيات
-                url = "https://t.me/telegram" # رابط وهمي، يجب على المستخدم الانضمام يدويًا
+            # محاولة الحصول على رابط دعوة للقناة
+            invite_link = None
+            try:
+                # محاولة الحصول على معلومات القناة
+                chat = await context.bot.get_chat(CHANNEL_ID)
+                # استخدام invite_link إذا كان متاحًا (للقنوات العامة أو الخاصة التي لديها رابط دعوة دائم)
+                invite_link = chat.invite_link
+            except Exception as e:
+                logger.warning(f"Could not get chat info or invite link: {e}")
                 
-            keyboard = [[InlineKeyboardButton("اشترك في القناة", url=url)]]
+            # إذا لم نتمكن من الحصول على رابط دعوة، نستخدم رابط القناة العام إذا كان متاحًا
+            if not invite_link:
+                channel_username = CHANNEL_ID.lstrip('@')
+                if not channel_username.startswith('-100'):
+                    invite_link = f"https://t.me/{channel_username}"
+                else:
+                    # إذا كانت قناة خاصة ولم نتمكن من الحصول على رابط دعوة
+                    invite_link = "https://t.me/telegram" # رابط وهمي، يجب على المستخدم الانضمام يدويًا
+            
+            keyboard = [[InlineKeyboardButton("اشترك في القناة", url=invite_link)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(
@@ -196,10 +207,29 @@ async def check_subscription(update: Update, context):
             return False
             
     except Exception as e:
-        logger.error(f"Error checking subscription: {e}")
-        await update.message.reply_text(
-            "عذراً، حدث خطأ أثناء التحقق من الاشتراك. يرجى التأكد من أن البوت مشرف في القناة الإجبارية."
-        )
+        # 3. معالجة الأخطاء (مثل البوت ليس مشرفًا أو معرف القناة غير صحيح)
+        error_message = str(e)
+        logger.error(f"Error checking subscription: {error_message}")
+        
+        # رسالة خطأ أكثر وضوحًا للمستخدم
+        if "chat not found" in error_message or "Bad Request: chat not found" in error_message:
+            await update.message.reply_text(
+                "عذراً، لم يتم العثور على القناة الإجبارية. يرجى التأكد من صحة معرف القناة في الكود."
+            )
+        elif "not a member of the chat" in error_message or "Bad Request: user not a member" in error_message:
+            # هذا يحدث إذا كان البوت ليس عضواً في القناة الخاصة
+            await update.message.reply_text(
+                "عذراً، البوت ليس عضواً في القناة الإجبارية. يرجى إضافته كعضو ومشرف."
+            )
+        elif "bot is not an administrator" in error_message:
+            await update.message.reply_text(
+                "عذراً، البوت ليس مشرفاً في القناة الإجبارية. يرجى منحه صلاحيات الإشراف."
+            )
+        else:
+            await update.message.reply_text(
+                f"عذراً، حدث خطأ غير متوقع أثناء التحقق من الاشتراك: {error_message}"
+            )
+            
         return False
 
 # ----------------------------------------------------------------------
@@ -234,7 +264,7 @@ async def start_command(update: Update, context):
 
 async def admin_command(update: Update, context):
     """يعرض لوحة التحكم للمدير."""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("عذراً، هذا الأمر مخصص للمدير فقط.")
         return
         
@@ -251,7 +281,7 @@ async def admin_command(update: Update, context):
     # عرض خيارات الحظر/فك الحظر
     keyboard = []
     for user_id, username in ACTIVE_USERS.items():
-        if user_id != ADMIN_USER_ID: # لا يمكن حظر المدير
+        if user_id != ADMIN_ID: # لا يمكن حظر المدير
             if user_id not in BLOCKED_USERS:
                 # زر حظر
                 keyboard.append([InlineKeyboardButton(f"حظر @{username}", callback_data=f"block_user|{user_id}")])
@@ -267,7 +297,7 @@ async def admin_command(update: Update, context):
 
 async def block_command(update: Update, context):
     """أمر حظر مستخدم يدويًا."""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("عذراً، هذا الأمر مخصص للمدير فقط.")
         return
         
@@ -293,7 +323,7 @@ async def block_command(update: Update, context):
                 user_to_block_id = user_id
                 break
                 
-    if user_to_block_id and user_to_block_id != ADMIN_USER_ID:
+    if user_to_block_id and user_to_block_id != ADMIN_ID:
         BLOCKED_USERS.add(user_to_block_id)
         save_blocked_users() # حفظ التغيير
         username = ACTIVE_USERS.get(user_to_block_id, f"User_{user_to_block_id}")
@@ -302,14 +332,14 @@ async def block_command(update: Update, context):
             await context.bot.send_message(user_to_block_id, "لقد تم حظرك من استخدام هذا البوت.")
         except Exception:
             pass
-    elif user_to_block_id == ADMIN_USER_ID:
+    elif user_to_block_id == ADMIN_ID:
         await update.message.reply_text("لا يمكنك حظر نفسك أيها المدير!")
     else:
         await update.message.reply_text(f"لم يتم العثور على المستخدم {target} في قائمة المستخدمين النشطين.")
 
 async def unblock_command(update: Update, context):
     """أمر فك حظر مستخدم يدويًا."""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("عذراً، هذا الأمر مخصص للمدير فقط.")
         return
         
@@ -442,7 +472,7 @@ async def button_callback(update: Update, context):
     
     elif data_type == "block_user":
         # معالجة أمر الحظر من لوحة التحكم
-        if query.from_user.id != ADMIN_USER_ID:
+        if query.from_user.id != ADMIN_ID:
             await query.edit_message_text("عذراً، هذا الأمر مخصص للمدير فقط.")
             return
             
@@ -462,7 +492,7 @@ async def button_callback(update: Update, context):
 
     elif data_type == "unblock_user":
         # معالجة أمر فك الحظر من لوحة التحكم
-        if query.from_user.id != ADMIN_USER_ID:
+        if query.from_user.id != ADMIN_ID:
             await query.edit_message_text("عذراً، هذا الأمر مخصص للمدير فقط.")
             return
             
