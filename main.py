@@ -23,7 +23,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logger = logging.getLogger(_name_)
+logger = logging.getLogger(__name__)
 
 # حالات المحادثة لميزة البث
 BROADCAST_MESSAGE = range(1)
@@ -234,5 +234,6 @@ def main():
     application.run_polling()
 
 # --- السطر الذي طلبته ---
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()
+
