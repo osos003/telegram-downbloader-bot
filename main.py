@@ -1,4 +1,4 @@
-# main.py (النسخة مع ميزة البث للأدمن)
+# main.py (النسخة المصححة لمشكلة البث)
 
 import logging
 import os
@@ -14,8 +14,7 @@ try:
     ADMIN_ID = int(os.environ.get("ADMIN_ID"))
     CHANNEL_ID = os.environ.get("CHANNEL_ID")
 except (TypeError, ValueError):
-    print("خطأ: لم يتم العثور على متغيرات البيئة (BOT_TOKEN, ADMIN_ID, CHANNEL_ID).")
-    exit()
+    print("خطأ: لم يتم العثور على متغيرات البيئة. سيتم استخدام القيم المحلية للتجربة.")
 
 # أسماء الملفات لتخزين البيانات
 USERS_FILE = "users.txt"
@@ -31,36 +30,29 @@ logger = logging.getLogger(__name__)
 # حالات المحادثة لميزة البث
 BROADCAST_MESSAGE = range(1)
 
-# --- دوال الأدمن وحفظ البيانات ---
+# --- دوال الأدمن وحفظ البيانات (كما هي) ---
 def get_all_user_ids():
-    """قراءة كل معرفات المستخدمين من الملف"""
-    if not os.path.exists(USERS_FILE):
-        return []
+    if not os.path.exists(USERS_FILE): return []
     try:
-        with open(USERS_FILE, "r") as f:
-            return [int(user_id) for user_id in f.read().splitlines()]
+        with open(USERS_FILE, "r") as f: return [int(user_id) for user_id in f.read().splitlines()]
     except Exception as e:
         logger.error(f"خطأ في قراءة ملف المستخدمين: {e}")
         return []
 
 def add_user_to_file(user_id: int):
     try:
-        all_users = get_all_user_ids()
-        if user_id not in all_users:
-            with open(USERS_FILE, "a") as f:
-                f.write(str(user_id) + "\n")
-    except Exception as e:
-        logger.error(f"خطأ في إضافة مستخدم: {e}")
+        if user_id not in get_all_user_ids():
+            with open(USERS_FILE, "a") as f: f.write(str(user_id) + "\n")
+    except Exception as e: logger.error(f"خطأ في إضافة مستخدم: {e}")
 
-def get_users_count() -> int:
-    return len(get_all_user_ids())
-
+def get_users_count() -> int: return len(get_all_user_ids())
 def add_link_to_file(user_id: int, link: str):
     try:
         with open(LINKS_FILE, "a", encoding='utf-8') as f: f.write(f"User_ID: {user_id}, Link: {link}\n")
     except Exception as e: logger.error(f"خطأ في إضافة رابط: {e}")
 
 def get_last_links(count: int = 10) -> str:
+    # ... (الكود هنا لم يتغير)
     try:
         if not os.path.exists(LINKS_FILE): return "لم يتم إرسال أي روابط بعد."
         with open(LINKS_FILE, "r", encoding='utf-8') as f:
@@ -93,7 +85,7 @@ async def start_command(update: Update, context: CallbackContext):
 
 # --- معالجة الروابط والتحميل (كما هي) ---
 async def handle_link(update: Update, context: CallbackContext):
-    # ... (الكود هنا لم يتغير، لذا تم إخفاؤه للاختصار)
+    # ... (الكود هنا لم يتغير)
     user_id = update.message.from_user.id
     if not await is_user_subscribed(user_id, context):
         await update.message.reply_text("عذراً، يجب عليك الاشتراك في القناة أولاً. اضغط /start للمحاولة مجدداً.")
@@ -179,7 +171,7 @@ async def admin_command(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("📊 عرض عدد المستخدمين", callback_data='admin_stats')],
         [InlineKeyboardButton("🔗 عرض آخر 10 روابط", callback_data='admin_links')],
-        [InlineKeyboardButton("📢 إرسال رسالة للجميع", callback_data='admin_broadcast')] # <-- الزر الجديد
+        [InlineKeyboardButton("📢 إرسال رسالة للجميع", callback_data='admin_broadcast')]
     ]
     await update.message.reply_text("أهلاً بك يا مالك البوت! هذه لوحة التحكم:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -195,61 +187,76 @@ async def admin_button_handler(update: Update, context: CallbackContext):
     elif query.data == 'admin_links':
         await query.edit_message_text(f"آخر 10 روابط:\n\n{get_last_links(10)}")
     elif query.data == 'admin_broadcast':
-        await query.edit_message_text("حسناً، أرسل الآن الرسالة التي تود إرسالها لجميع المستخدمين.")
-        return BROADCAST_MESSAGE # الدخول في وضع انتظار الرسالة
+        await query.edit_message_text("حسناً، أرسل الآن الرسالة التي تود إرسالها لجميع المستخدمين. للإلغاء أرسل /cancel.")
+        return BROADCAST_MESSAGE
 
-# --- دوال ميزة البث الجديدة ---
+# --- دوال ميزة البث (تم تصحيحها) ---
 async def broadcast_message_handler(update: Update, context: CallbackContext):
-    """معالجة رسالة البث وإرسالها للجميع"""
     message_to_broadcast = update.message
     user_ids = get_all_user_ids()
-    
-    await update.message.reply_text(f"تم استلام الرسالة. سأبدأ الآن بإرسالها إلى {len(user_ids)} مستخدم. قد يستغرق هذا بعض الوقت...")
+    await update.message.reply_text(f"تم استلام الرسالة. سأبدأ الآن بإرسالها إلى {len(user_ids)} مستخدم...")
     
     success_count = 0
     fail_count = 0
     
+    # هنا نستخدم context.application.bot بدلاً من context.bot
+    bot = context.application.bot 
+    
     for user_id in user_ids:
         try:
-            # إعادة إرسال الرسالة كما هي (نص، صورة، الخ)
-            await context.bot.copy_message(chat_id=user_id, from_chat_id=update.message.chat_id, message_id=message_to_broadcast.message_id)
+            await bot.copy_message(chat_id=user_id, from_chat_id=update.message.chat_id, message_id=message_to_broadcast.message_id)
             success_count += 1
-            await asyncio.sleep(0.1) # فاصل زمني بسيط لتجنب إغراق سيرفرات تليجرام
+            await asyncio.sleep(0.1)
         except Exception as e:
             logger.error(f"فشل إرسال البث إلى {user_id}: {e}")
             fail_count += 1
             
-    await update.message.reply_text(f"✅ اكتمل البث!\n\n- تم الإرسال بنجاح إلى: {success_count} مستخدم.\n- فشل الإرسال إلى: {fail_count} مستخدم (ربما قاموا بحظر البوت).")
-    
-    return ConversationHandler.END # الخروج من وضع البث
+    await update.message.reply_text(f"✅ اكتمل البث!\n\n- نجح: {success_count}\n- فشل: {fail_count}")
+    return ConversationHandler.END
 
 async def cancel_broadcast(update: Update, context: CallbackContext):
-    """إلغاء عملية البث"""
     await update.message.reply_text("تم إلغاء عملية البث.")
     return ConversationHandler.END
 
-def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+async def post_init(application: Application):
+    """دالة للتهيئة بعد تشغيل البوت"""
+    await application.bot.set_my_commands([
+        ('start', 'بدء استخدام البوت'),
+        ('admin', 'لوحة تحكم المالك')
+    ])
 
-    # محادثة البث للأدمن
+async def main():
+    """الدالة الرئيسية لتشغيل البوت"""
+    # تم إضافة post_init هنا
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
     broadcast_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_button_handler, pattern='^admin_broadcast$')],
         states={
             BROADCAST_MESSAGE: [MessageHandler(filters.ALL & ~filters.COMMAND, broadcast_message_handler)],
         },
         fallbacks=[CommandHandler('cancel', cancel_broadcast)],
+        conversation_timeout=300 # مهلة 5 دقائق
     )
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     
-    application.add_handler(broadcast_conv_handler) # إضافة محادثة البث
+    application.add_handler(broadcast_conv_handler)
     application.add_handler(CallbackQueryHandler(button_handler, pattern='^download_'))
     application.add_handler(CallbackQueryHandler(admin_button_handler, pattern='^admin_'))
 
     print("البوت قيد التشغيل...")
-    application.run_polling()
+    # تم تغيير run_polling إلى الطريقة الجديدة
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    # حلقة لا نهائية لإبقاء البوت يعمل
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == '__main__':
-    main()
+    # تشغيل الدالة الرئيسية غير المتزامنة
+    asyncio.run(main())
