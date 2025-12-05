@@ -1,224 +1,529 @@
-# main.py (النسخة المصححة من الفيديو فقط)
-
 import logging
 import os
+import re
 import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
-from telegram.constants import ChatMemberStatus
-import os
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+
+# إعداد التسجيل (Logging)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
-# أسماء الملفات لتخزين البيانات
-USERS_FILE = "users.txt"
-LINKS_FILE = "links.txt"
 
-# إعداد تسجيل الأخطاء
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(_name_)
 
-# --- دوال الأدمن وحفظ البيانات ---
-def add_user_to_file(user_id: int):
+BLOCKED_USERS_FILE = 'blocked_users.txt'
+
+def load_blocked_users():
+    """تحميل قائمة المستخدمين المحظورين من الملف النصي."""
     try:
-        if not os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "w") as f: f.write(str(user_id) + "\n")
+        with open(BLOCKED_USERS_FILE, 'r') as f:
+            # قراءة كل سطر وتحويله إلى عدد صحيح (معرف المستخدم)
+            return set(int(line.strip()) for line in f if line.strip())
+    except FileNotFoundError:
+        return set()
+    except Exception as e:
+        logger.error(f"Error loading blocked users: {e}")
+        return set()
+
+def save_blocked_users():
+    """حفظ قائمة المستخدمين المحظورين إلى الملف النصي."""
+    try:
+        with open(BLOCKED_USERS_FILE, 'w') as f:
+            # كتابة كل معرف مستخدم في سطر جديد
+            for user_id in BLOCKED_USERS:
+                f.write(f"{user_id}\n")
+    except Exception as e:
+        logger.error(f"Error saving blocked users: {e}")
+
+# قائمة المستخدمين المحظورين (سيتم تحميلها عند بدء التشغيل)
+BLOCKED_USERS = load_blocked_users()
+
+# قائمة المستخدمين النشطين مؤقتًا لتسهيل لوحة التحكم
+ACTIVE_USERS = {} # {user_id: username}
+
+# دقة الفيديو المطلوبة
+TARGET_RESOLUTIONS = [720, 480, 360, 240]
+
+# ----------------------------------------------------------------------
+# وظائف yt-dlp المساعدة
+# ----------------------------------------------------------------------
+
+def get_available_formats(url):
+    """يستخرج معلومات التنسيقات المتاحة من الرابط باستخدام yt-dlp."""
+    ydl_opts = {
+        'quiet': True,
+        'skip_download': True,
+        'force_generic_extractor': True,
+        'simulate': True,
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(url, download=False)
+            
+            # إذا كان المحتوى صورة (مثل منشور انستجرام به صورة واحدة)
+            if info_dict.get('_type') == 'url' and 'webpage_url' in info_dict:
+                # قد يكون رابطًا لصفحة ويب تحتوي على صورة أو فيديو، سنعتبره فيديو مبدئيًا
+                pass
+
+            # إذا كان المحتوى عبارة عن قائمة تشغيل أو عدة ملفات (مثل منشور انستجرام متعدد)
+            if 'entries' in info_dict:
+                # سنركز على أول إدخال فقط لتبسيط العملية
+                info_dict = info_dict['entries'][0]
+            
+            # التحقق مما إذا كان المحتوى فيديو
+            if info_dict.get('duration') is not None or info_dict.get('is_live'):
+                is_video = True
+            else:
+                # إذا لم يكن هناك مدة، فقد يكون صورة أو محتوى غير مدعوم
+                is_video = False
+                
+            if not is_video:
+                # إذا لم يكن فيديو، سنحاول إرسال الصورة/المحتوى مباشرة
+                return None, info_dict # None للتنسيقات، و info_dict للمعلومات
+            
+            # استخراج التنسيقات المتاحة
+            formats = info_dict.get('formats', [])
+            
+            # تصفية التنسيقات للحصول على أفضل تطابق للدقة المطلوبة
+            available_formats = {}
+            for res in TARGET_RESOLUTIONS:
+                # البحث عن أفضل تنسيق MP4 أو تنسيق فيديو مع دقة قريبة
+                best_format = None
+                best_diff = float('inf')
+                
+                for f in formats:
+                    if f.get('vcodec') != 'none' and f.get('ext') in ['mp4', 'webm', 'mkv']:
+                        height = f.get('height')
+                        if height:
+                            diff = abs(height - res)
+                            if diff < best_diff:
+                                best_diff = diff
+                                best_format = f
+                
+                if best_format:
+                    # تخزين أفضل تنسيق تم العثور عليه للدقة المطلوبة
+                    # نستخدم format_id كقيمة للزر
+                    available_formats[f"{res}p"] = best_format['format_id']
+                    
+            return available_formats, info_dict
+            
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"yt-dlp DownloadError: {e}")
+        return False, str(e)
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in yt-dlp: {e}")
+        return False, str(e)
+
+def download_media(url, format_id=None):
+    """يقوم بتنزيل الوسائط (فيديو أو صورة) باستخدام yt-dlp."""
+    output_template = os.path.join(os.getcwd(), 'downloads', '%(title)s.%(ext)s')
+    
+    ydl_opts = {
+        'outtmpl': output_template,
+        'quiet': True,
+        'no_warnings': True,
+        'format': format_id if format_id else 'best',
+        'postprocessors': [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4',
+        }] if format_id else [],
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(url, download=True)
+            
+            # تحديد المسار الذي تم التنزيل إليه
+            # yt-dlp يضيف الامتداد تلقائيًا
+            downloaded_file = ydl.prepare_filename(info_dict)
+            
+            # إذا كان هناك عدة ملفات (مثل منشور انستجرام متعدد)
+            if 'entries' in info_dict:
+                # سنعيد قائمة بالملفات التي تم تنزيلها
+                downloaded_files = []
+                for entry in info_dict['entries']:
+                    downloaded_files.append(ydl.prepare_filename(entry))
+                return downloaded_files, info_dict
+            
+            return [downloaded_file], info_dict
+            
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"yt-dlp DownloadError: {e}")
+        return False, str(e)
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during download: {e}")
+        return False, str(e)
+
+# ----------------------------------------------------------------------
+# وظيفة فحص الاشتراك الإجباري
+# ----------------------------------------------------------------------
+
+async def check_subscription(update: Update, context):
+    """يفحص ما إذا كان المستخدم مشتركًا في القناة الإجبارية."""
+    user_id = update.effective_user.id
+    
+    try:
+        # استخدام get_chat_member للتحقق من حالة العضوية
+        chat_member = await context.bot.get_chat_member(MANDATORY_CHANNEL_ID, user_id)
+        
+        # حالات العضوية المقبولة: member, administrator, creator
+        if chat_member.status in ['member', 'administrator', 'creator']:
+            return True
         else:
-            with open(USERS_FILE, "r+") as f:
-                if str(user_id) not in f.read().splitlines(): f.write(str(user_id) + "\n")
-    except Exception as e: logger.error(f"خطأ في إضافة مستخدم: {e}")
-
-def get_users_count() -> int:
-    try:
-        if not os.path.exists(USERS_FILE): return 0
-        with open(USERS_FILE, "r") as f: return len(f.readlines())
+            # المستخدم ليس مشتركًا
+            # يجب أن تكون القناة عامة ليتمكن المستخدم من الانضمام عبر الرابط
+            # أو يجب أن يكون البوت مشرفًا في القناة الخاصة
+            channel_username = MANDATORY_CHANNEL_ID.lstrip('@')
+            if not channel_username.startswith('-100'):
+                url = f"https://t.me/{channel_username}"
+            else:
+                # لا يمكن إنشاء رابط دعوة مباشر للقنوات الخاصة دون صلاحيات
+                url = "https://t.me/telegram" # رابط وهمي، يجب على المستخدم الانضمام يدويًا
+                
+            keyboard = [[InlineKeyboardButton("اشترك في القناة", url=url)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "عذراً، يجب عليك الاشتراك في القناة التالية لاستخدام البوت:",
+                reply_markup=reply_markup
+            )
+            return False
+            
     except Exception as e:
-        logger.error(f"خطأ في قراءة عدد المستخدمين: {e}")
-        return 0
-
-def add_link_to_file(user_id: int, link: str):
-    try:
-        with open(LINKS_FILE, "a", encoding='utf-8') as f: f.write(f"User_ID: {user_id}, Link: {link}\n")
-    except Exception as e: logger.error(f"خطأ في إضافة رابط: {e}")
-
-def get_last_links(count: int = 10) -> str:
-    try:
-        if not os.path.exists(LINKS_FILE): return "لم يتم إرسال أي روابط بعد."
-        with open(LINKS_FILE, "r", encoding='utf-8') as f:
-            lines = f.readlines()
-            return "".join(lines[-count:]) if lines else "لا توجد روابط حالياً."
-    except Exception as e:
-        logger.error(f"خطأ في قراءة الروابط: {e}")
-        return "حدث خطأ أثناء قراءة الروابط."
-
-# --- دوال البوت الأساسية ---
-async def is_user_subscribed(user_id: int, context: CallbackContext) -> bool:
-    try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-    except Exception as e:
-        logger.error(f"خطأ في التحقق من الاشتراك: {e}")
-        if "user not found" in str(e).lower() and user_id == ADMIN_ID:
-             await context.bot.send_message(ADMIN_ID, f"⚠ تنبيه: تأكد أن البوت مشرف في القناة {CHANNEL_ID}.")
+        logger.error(f"Error checking subscription: {e}")
+        await update.message.reply_text(
+            "عذراً، حدث خطأ أثناء التحقق من الاشتراك. يرجى التأكد من أن البوت مشرف في القناة الإجبارية."
+        )
         return False
 
-async def start_command(update: Update, context: CallbackContext):
-    user = update.message.from_user
-    add_user_to_file(user.id)
-    welcome_message = f"أهلاً بك يا {user.first_name}!\n\n"
-    if await is_user_subscribed(user.id, context):
-        welcome_message += "أرسل لي أي رابط فيديو من (يوتيوب، فيسبوك، تيك توك...) وسأقوم بتجهيزه لك."
-        await update.message.reply_text(welcome_message)
+# ----------------------------------------------------------------------
+# معالجات رسائل البوت
+# ----------------------------------------------------------------------
+
+async def start_command(update: Update, context):
+    """يرد على أمر /start."""
+    user = update.effective_user
+    # تسجيل المستخدم النشط
+    if user.username:
+        ACTIVE_USERS[user.id] = user.username
     else:
-        welcome_message += "لاستخدام البوت، يرجى الاشتراك في قناتنا أولاً ثم الضغط على /start مجدداً."
-        keyboard = [[InlineKeyboardButton("✅ اضغط هنا للاشتراك", url=f"https://t.me/{CHANNEL_ID.replace('@', '')}")]]
-        await update.message.reply_text(welcome_message, reply_markup=InlineKeyboardMarkup(keyboard))
-
-# --- معالجة الروابط والتحميل ---
-
-async def handle_link(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if not await is_user_subscribed(user_id, context):
-        await update.message.reply_text("عذراً، يجب عليك الاشتراك في القناة أولاً. اضغط /start للمحاولة مجدداً.")
+        ACTIVE_USERS[user.id] = f"User_{user.id}"
+    user_id = update.effective_user.id
+    if user_id in BLOCKED_USERS:
+        await update.message.reply_text("عذراً، لقد تم حظرك من استخدام هذا البوت.")
         return
+        
+    if not await check_subscription(update, context):
+        return
+        
+    await update.message.reply_text(
+        "أهلاً بك في بوت تنزيل الوسائط! \n"
+        "أرسل لي رابط فيديو أو صورة من أي منصة تواصل اجتماعي وسأقوم بتنزيلها لك. \n"
+        "للفيديو، سأعرض لك خيارات الدقة المتاحة."
+    )
 
-    link = update.message.text
-    add_link_to_file(user_id, link)
+# ----------------------------------------------------------------------
+# أوامر لوحة التحكم (للمدير فقط)
+# ----------------------------------------------------------------------
+
+async def admin_command(update: Update, context):
+    """يعرض لوحة التحكم للمدير."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("عذراً، هذا الأمر مخصص للمدير فقط.")
+        return
+        
+    # عرض قائمة المستخدمين النشطين
+    users_list = "قائمة المستخدمين النشطين (آخر من تفاعل مع البوت):\n\n"
     
-    processing_message = await update.message.reply_text("⏳ جاري استخراج معلومات الفيديو، يرجى الانتظار...")
-
-    try:
-        ydl_opts = {'quiet': True, 'dump_json': True, 'skip_download': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(link, download=False)
+    # ترتيب المستخدمين حسب آخر تفاعل (افتراضيًا، الترتيب الذي تم به الإضافة)
+    for user_id, username in ACTIVE_USERS.items():
+        status = "محظور" if user_id in BLOCKED_USERS else "نشط"
+        users_list += f"@{username} (ID: {user_id}) - الحالة: {status}\n"
         
-        context.user_data['video_info'] = info_dict
-        
-        formats = [f for f in info_dict.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height') is not None]
-        available_resolutions = sorted(list(set([f['height'] for f in formats if f['height'] in [240, 360, 480, 720]])))
-        
-        if not available_resolutions:
-            await processing_message.edit_text("لم يتم العثور على جودات فيديو مدعومة (240, 360, 480, 720p).")
-            return
-
-        keyboard = []
-        for res in available_resolutions:
-            best_format = max([f for f in formats if f['height'] == res], key=lambda f: f.get('filesize', 0) or f.get('filesize_approx', 0))
-            format_id = best_format['format_id']
-            filesize_mb = (best_format.get('filesize') or best_format.get('filesize_approx', 0)) / (1024 * 1024)
-            label = f"{res}p"
-            if filesize_mb > 0:
-                label += f" ({filesize_mb:.1f} MB)"
-            keyboard.append([InlineKeyboardButton(label, callback_data=f"download_{format_id}")])
-        
+    await update.message.reply_text(users_list)
+    
+    # عرض خيارات الحظر/فك الحظر
+    keyboard = []
+    for user_id, username in ACTIVE_USERS.items():
+        if user_id != ADMIN_USER_ID: # لا يمكن حظر المدير
+            if user_id not in BLOCKED_USERS:
+                # زر حظر
+                keyboard.append([InlineKeyboardButton(f"حظر @{username}", callback_data=f"block_user|{user_id}")])
+            else:
+                # زر فك الحظر
+                keyboard.append([InlineKeyboardButton(f"فك حظر @{username}", callback_data=f"unblock_user|{user_id}")])
+                
+    if keyboard:
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await processing_message.edit_text(f"✅ تم العثور على الفيديو:\n\n*{info_dict.get('title', 'بلا عنوان')}*\n\nاختر جودة الفيديو المطلوبة:", reply_markup=reply_markup, parse_mode='Markdown')
+        await update.message.reply_text("اختر مستخدمًا لإدارة حالته:", reply_markup=reply_markup)
+    else:
+        await update.message.reply_text("لا يوجد مستخدمون آخرون لإدارتهم حاليًا.")
 
-    except Exception as e:
-        logger.error(f"خطأ في معالجة الرابط {link}: {e}")
-        await processing_message.edit_text("❌ عذراً، لم أتمكن من معالجة هذا الرابط. قد يكون الرابط غير صحيح أو أن الموقع غير مدعوم.")
-
-# -- الدالة المفقودة التي تم إضافتها هنا --
-async def button_handler(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    
-    action = query.data
-    info = context.user_data.get('video_info')
-
-    if not info:
-        await query.edit_message_text("انتهت صلاحية هذه الجلسة. يرجى إرسال الرابط مرة أخرى.")
+async def block_command(update: Update, context):
+    """أمر حظر مستخدم يدويًا."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("عذراً، هذا الأمر مخصص للمدير فقط.")
         return
-
-    if action.startswith('download_'):
-        format_id = action.split('_')[-1]
-        await query.edit_message_text("⏳ جاري تجهيز الفيديو...")
-        await download_and_send(query, context, format_id=format_id)
-
-async def download_and_send(query, context, format_id):
-    info = context.user_data.get('video_info')
-    chat_id = query.message.chat_id
+        
+    if not context.args:
+        await update.message.reply_text("الرجاء تحديد اسم المستخدم (@username) أو معرف المستخدم (ID) للحظر. مثال: /block @username")
+        return
+        
+    target = context.args[0]
     
-    progress_hooks = [lambda d: progress_hook(d, query, context)]
+    # محاولة تحديد المستخدم من القائمة النشطة
+    user_to_block_id = None
     
+    # البحث بالـ ID
     try:
-        ydl_opts = {
-            'format': format_id,
-            'outtmpl': f'{chat_id}_%(id)s.%(ext)s',
-            'progress_hooks': progress_hooks,
-            'noplaylist': True, # لمنع تحميل قائمة تشغيل كاملة
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            file_info = ydl.extract_info(info['webpage_url'], download=False)
-            filename = ydl.prepare_filename(file_info)
-            ydl.download([info['webpage_url']])
-
-        await query.edit_message_text("⬆ جاري رفع الملف إليك...")
-        with open(filename, 'rb') as file_to_send:
-            await context.bot.send_video(chat_id=chat_id, video=file_to_send, caption=info.get('title', ''), supports_streaming=True)
-        
-        await query.delete_message()
-
-    except Exception as e:
-        logger.error(f"خطأ في التحميل/الإرسال: {e}")
-        await query.edit_message_text(f"❌ حدث خطأ فادح أثناء التحميل. قد يكون حجم الملف كبيراً جداً.\n\nالخطأ: {e}")
-    finally:
-        if 'filename' in locals() and os.path.exists(filename):
-            os.remove(filename)
-
-async def progress_hook(d, query, context):
-    if d['status'] == 'downloading':
-        if 'last_update' in context.user_data and (d['_eta_str'] == context.user_data.get('last_update')):
-            return
-        
-        percent = d['_percent_str'].strip()
-        speed = d['_speed_str'].strip()
-        eta = d['_eta_str'].strip()
-        
+        user_id_int = int(target)
+        if user_id_int in ACTIVE_USERS:
+            user_to_block_id = user_id_int
+    except ValueError:
+        # البحث بالـ Username
+        target_username = target.lstrip('@')
+        for user_id, username in ACTIVE_USERS.items():
+            if username == target_username:
+                user_to_block_id = user_id
+                break
+                
+    if user_to_block_id and user_to_block_id != ADMIN_USER_ID:
+        BLOCKED_USERS.add(user_to_block_id)
+        save_blocked_users() # حفظ التغيير
+        username = ACTIVE_USERS.get(user_to_block_id, f"User_{user_to_block_id}")
+        await update.message.reply_text(f"تم حظر المستخدم @{username} (ID: {user_to_block_id}) بنجاح.")
         try:
-            await query.edit_message_text(f"Downloading...\n\n📊 *التقدم:* {percent}\n⚙ *السرعة:* {speed}\n⏱ *الوقت المتبقي:* {eta}", parse_mode='Markdown')
-            context.user_data['last_update'] = eta
+            await context.bot.send_message(user_to_block_id, "لقد تم حظرك من استخدام هذا البوت.")
         except Exception:
             pass
+    elif user_to_block_id == ADMIN_USER_ID:
+        await update.message.reply_text("لا يمكنك حظر نفسك أيها المدير!")
+    else:
+        await update.message.reply_text(f"لم يتم العثور على المستخدم {target} في قائمة المستخدمين النشطين.")
 
-# --- أوامر الأدمن ---
-async def admin_command(update: Update, context: CallbackContext):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("هذا الأمر مخصص للمالك فقط.")
+async def unblock_command(update: Update, context):
+    """أمر فك حظر مستخدم يدويًا."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("عذراً، هذا الأمر مخصص للمدير فقط.")
         return
-    keyboard = [[InlineKeyboardButton("📊 عرض عدد المستخدمين", callback_data='admin_stats')], [InlineKeyboardButton("🔗 عرض آخر 10 روابط", callback_data='admin_links')]]
-    await update.message.reply_text("أهلاً بك يا مالك البوت! هذه لوحة التحكم:", reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    if not context.args:
+        await update.message.reply_text("الرجاء تحديد اسم المستخدم (@username) أو معرف المستخدم (ID) لفك الحظر. مثال: /unblock @username")
+        return
+        
+    target = context.args[0]
+    
+    # محاولة تحديد المستخدم من القائمة النشطة
+    user_to_unblock_id = None
+    
+    # البحث بالـ ID
+    try:
+        user_id_int = int(target)
+        if user_id_int in ACTIVE_USERS:
+            user_to_unblock_id = user_id_int
+    except ValueError:
+        # البحث بالـ Username
+        target_username = target.lstrip('@')
+        for user_id, username in ACTIVE_USERS.items():
+            if username == target_username:
+                user_to_unblock_id = user_id
+                break
+                
+    if user_to_unblock_id:
+        if user_to_unblock_id in BLOCKED_USERS:
+            BLOCKED_USERS.remove(user_to_unblock_id)
+            save_blocked_users() # حفظ التغيير
+            username = ACTIVE_USERS.get(user_to_unblock_id, f"User_{user_to_unblock_id}")
+            await update.message.reply_text(f"تم فك حظر المستخدم @{username} (ID: {user_to_unblock_id}) بنجاح.")
+            try:
+                await context.bot.send_message(user_to_unblock_id, "تم فك حظرك. يمكنك الآن استخدام البوت مجدداً.")
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text(f"المستخدم {target} غير محظور أصلاً.")
+    else:
+        await update.message.reply_text(f"لم يتم العثور على المستخدم {target} في قائمة المستخدمين النشطين.")
 
-async def admin_button_handler(update: Update, context: CallbackContext):
+async def handle_link(update: Update, context):
+    """يعالج الروابط المرسلة من المستخدمين."""
+    user = update.effective_user
+    user_id = user.id
+    # تسجيل المستخدم النشط
+    if user.username:
+        ACTIVE_USERS[user_id] = user.username
+    else:
+        ACTIVE_USERS[user_id] = f"User_{user_id}"
+    if user_id in BLOCKED_USERS:
+        await update.message.reply_text("عذراً، لقد تم حظرك من استخدام هذا البوت.")
+        return
+        
+    if not await check_subscription(update, context):
+        return
+    
+    url = update.message.text
+    
+    # تحقق من أن النص المرسل يبدو كرابط
+    if not re.match(r'https?://\S+', url):
+        await update.message.reply_text("الرجاء إرسال رابط صحيح.")
+        return
+
+    await update.message.reply_text("جاري تحليل الرابط... قد يستغرق هذا بضع ثوانٍ.")
+    
+    formats, info = get_available_formats(url)
+    
+    if formats is False:
+        await update.message.reply_text(f"عذراً، حدث خطأ أثناء تحليل الرابط: {info}")
+        return
+        
+    if formats is None:
+        # ليس فيديو، قد يكون صورة أو محتوى آخر يمكن تنزيله مباشرة
+        await update.message.reply_text("تم تحديد المحتوى كصورة أو ملف غير فيديو. جاري التنزيل والإرسال مباشرة...")
+        
+        # سنقوم بتنزيل الملف وإرساله
+        downloaded_files, info = download_media(url)
+        
+        if downloaded_files is False:
+            await update.message.reply_text(f"عذراً، حدث خطأ أثناء تنزيل الملف: {info}")
+            return
+            
+        for file_path in downloaded_files:
+            try:
+                if info.get('ext') in ['jpg', 'jpeg', 'png', 'webp']:
+                    await update.message.reply_photo(photo=open(file_path, 'rb'))
+                elif info.get('ext') in ['mp4', 'webm', 'mkv']:
+                    await update.message.reply_video(video=open(file_path, 'rb'))
+                else:
+                    await update.message.reply_document(document=open(file_path, 'rb'))
+                
+                # حذف الملف بعد الإرسال
+                os.remove(file_path)
+                
+            except Exception as e:
+                logger.error(f"Error sending file: {e}")
+                await update.message.reply_text(f"عذراً، حدث خطأ أثناء إرسال الملف: {e}")
+                
+        await update.message.reply_text("تم إرسال الملف بنجاح.")
+        return
+
+    # إذا كان فيديو، نعرض خيارات الدقة
+    keyboard = []
+    for res, format_id in formats.items():
+        # نستخدم صيغة: DATA_TYPE|URL|FORMAT_ID
+        callback_data = f"download|{url}|{format_id}"
+        keyboard.append([InlineKeyboardButton(f"تحميل بدقة {res}", callback_data=callback_data)])
+        
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"تم تحديد الفيديو: {info.get('title', 'بدون عنوان')}\n"
+        "الرجاء اختيار الدقة المطلوبة للتحميل:",
+        reply_markup=reply_markup
+    )
+
+async def button_callback(update: Update, context):
+    """يعالج ضغطات الأزرار المضمنة (Inline Buttons)."""
     query = update.callback_query
-    await query.answer()
-    if query.from_user.id != ADMIN_ID:
-        await query.edit_message_text("ليس لديك صلاحية.")
-        return
-    if query.data == 'admin_stats':
-        await query.edit_message_text(f"إجمالي المستخدمين: {get_users_count()}")
-    elif query.data == 'admin_links':
-        await query.edit_message_text(f"آخر 10 روابط:\n\n{get_last_links(10)}")
+    await query.answer() # يجب الرد على الاستعلام لتجنب ظهور "جاري التحميل" للمستخدم
+    
+    data = query.data.split('|')
+    data_type = data[0]
+    
+    if data_type == "download":
+        url = data[1]
+        format_id = data[2]
+        
+        await query.edit_message_text("جاري تنزيل الفيديو بالدقة المطلوبة... قد يستغرق هذا بعض الوقت.")
+    
+    elif data_type == "block_user":
+        # معالجة أمر الحظر من لوحة التحكم
+        if query.from_user.id != ADMIN_USER_ID:
+            await query.edit_message_text("عذراً، هذا الأمر مخصص للمدير فقط.")
+            return
+            
+        user_to_block_id = int(data[1])
+        BLOCKED_USERS.add(user_to_block_id)
+        save_blocked_users() # حفظ التغيير
+        
+        username = ACTIVE_USERS.get(user_to_block_id, f"User_{user_to_block_id}")
+        
+        await query.edit_message_text(f"تم حظر المستخدم @{username} (ID: {user_to_block_id}) بنجاح.")
+        
+        # إرسال رسالة للمستخدم المحظور (اختياري)
+        try:
+            await context.bot.send_message(user_to_block_id, "لقد تم حظرك من استخدام هذا البوت.")
+        except Exception:
+            pass # قد يكون المستخدم قد حظر البوت بالفعل
 
-# --- الدالة الرئيسية لتشغيل البوت ---
+    elif data_type == "unblock_user":
+        # معالجة أمر فك الحظر من لوحة التحكم
+        if query.from_user.id != ADMIN_USER_ID:
+            await query.edit_message_text("عذراً، هذا الأمر مخصص للمدير فقط.")
+            return
+            
+        user_to_unblock_id = int(data[1])
+        if user_to_unblock_id in BLOCKED_USERS:
+            BLOCKED_USERS.remove(user_to_unblock_id)
+            save_blocked_users() # حفظ التغيير
+            
+            username = ACTIVE_USERS.get(user_to_unblock_id, f"User_{user_to_unblock_id}")
+            
+            await query.edit_message_text(f"تم فك حظر المستخدم @{username} (ID: {user_to_unblock_id}) بنجاح.")
+        else:
+            await query.edit_message_text("المستخدم غير محظور أصلاً.")
+        
+        downloaded_files, info = download_media(url, format_id)
+        
+        if downloaded_files is False:
+            await query.edit_message_text(f"عذراً، حدث خطأ أثناء تنزيل الفيديو: {info}")
+            return
+            
+        # إرسال الفيديو
+        for file_path in downloaded_files:
+            try:
+                await context.bot.send_video(
+                    chat_id=query.message.chat_id,
+                    video=open(file_path, 'rb'),
+                    caption=f"تم تنزيل الفيديو: {info.get('title', 'بدون عنوان')}"
+                )
+                # حذف الملف بعد الإرسال
+                os.remove(file_path)
+                
+            except Exception as e:
+                logger.error(f"Error sending video: {e}")
+                await query.edit_message_text(f"عذراً، حدث خطأ أثناء إرسال الفيديو: {e}")
+                
+        await query.edit_message_text("تم إرسال الفيديو بنجاح. يمكنك إرسال رابط آخر.")
+
+# ----------------------------------------------------------------------
+# وظيفة التشغيل الرئيسية
+# ----------------------------------------------------------------------
+
 def main():
+    """يبدأ تشغيل البوت."""
+    # التأكد من وجود مجلد التحميلات
+    if not os.path.exists('downloads'):
+        os.makedirs('downloads')
+        
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # معالجات الأوامر والرسائل
+    # معالجات الأوامر والرسائل
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("block", block_command))
+    application.add_handler(CommandHandler("unblock", unblock_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
-    
-    # -- تم تصحيح الترتيب هنا --
-    application.add_handler(CallbackQueryHandler(button_handler, pattern='^download_'))
-    application.add_handler(CallbackQueryHandler(admin_button_handler, pattern='^admin_'))
+    application.add_handler(CallbackQueryHandler(button_callback))
 
-    print("البوت قيد التشغيل...")
-    application.run_polling()
+    # تشغيل البوت
+    logger.info("Bot started polling...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if _name_ == '_main_':
+if __name__ == '__main__':
     main()
